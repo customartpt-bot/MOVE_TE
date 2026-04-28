@@ -1,0 +1,41 @@
+Mapa da Estrutura do Projeto
+/src (O Coração da Aplicação)
+Esta é a pasta onde reside todo o código "inteligente".
+
+main.tsx: O ponto de entrada que "monta" a aplicação na página HTML.
+
+App.tsx: O "Cérebro" Global. Controla o estado principal da aplicação: quais camadas do mapa estão ativas, o utilizador ligado, e a estrutura geral do layout (Sidebar vs Mapa).
+
+/src/components (Módulos de Interface e Lógica)
+
+Aqui o JavaScript é usado para criar componentes interativos.
+
+Map.tsx: Lógica Geoespacial. Utiliza a biblioteca Leaflet.
+
+Complexidade: Processa ficheiros GeoJSON, calcula áreas de zoom, define ícones personalizados e gere os "Popups" que aparecem ao clicar nos clubes.
+
+CommandPanel.tsx: Lógica de Pesquisa e Filtros. Este é o ficheiro com mais "programação pura".
+
+Complexidade: Contém algoritmos de Normalização de Texto (remoção de acentos), Extração de Keywords (análise da frase do utilizador) e Filtros Matemáticos para mensalidades (comparação de preços extraídos de strings).
+
+StatsDashboard.tsx: Visualização de Dados.
+
+Complexidade: Usa a biblioteca Recharts para converter dados brutos da base de dados em gráficos interativos (barras, circulares) via JavaScript.
+
+DataCatalog.tsx: Faz a gestão das camadas de dados (freguesias, limites, entidades), comunicando com a base de dados para ativar/desativar informação em tempo real.
+
+/src/services (Integrações Externas)
+
+aiService.ts: Integração com Inteligência Artificial.
+
+Complexidade: Gere a comunicação com o modelo Gemini da Google. Envia o contexto da base de dados e recebe instruções para filtrar os dados através de SQL dinâmico.
+
+supabaseClient.ts: Configuração da ligação à base de dados PostgreSQL/PostGIS.
+
+Outros Ficheiros
+
+types.ts: Define as "formas" dos dados (Interfaces). Indica, por exemplo, que um "Clube" tem obrigatoriamente um nome (string) e uma localização (geom).
+
+index.css: Utiliza Tailwind CSS para o design, mas as variáveis e regras são aplicadas dinamicamente pelos componentes JavaScript.
+
+package.json: A lista de "ingredientes". Mostra que o projeto usa bibliotecas avançadas como framer-motion (para animações), leaflet (mapas) e lucide-react (ícones).
