@@ -63,17 +63,24 @@ export default function Map({ data, activeLayers = [] }: MapProps) {
       >
         <MapEventsHandler data={data} bounds={bounds} setBounds={setBounds} activeLayers={activeLayers} />
         <LayersControl position="topright">
-          <LayersControl.BaseLayer checked name="Satélite (Esri World Imagery)">
-            <TileLayer
-              attribution='&copy; <a href="https://www.esri.com/">Esri</a>'
-              url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-            />
-          </LayersControl.BaseLayer>
-          
-          <LayersControl.BaseLayer name="Mapa (OpenStreetMap)">
+          <LayersControl.BaseLayer checked name="Mapa (OpenStreetMap)">
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+          </LayersControl.BaseLayer>
+
+          <LayersControl.BaseLayer name="Satélite (Google)">
+            <TileLayer
+              attribution='&copy; Google'
+              url="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+            />
+          </LayersControl.BaseLayer>
+
+          <LayersControl.BaseLayer name="Satélite Híbrido">
+            <TileLayer
+              attribution='&copy; Google'
+              url="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
             />
           </LayersControl.BaseLayer>
 
