@@ -28,16 +28,19 @@ DATABASE SCHEMA:
 RULES:
 1. Return ONLY a JSON object with: "sql" (string) and "explanation" (Portuguese description).
 2. For modality searches, use ILIKE '%term%' on 'modalidade' or 'categoria'.
-3. PRICE FILTERING: If the user mentions a price (e.g. "até 10€", "menos de 20 euros"), you MUST add a WHERE clause that checks:
-   - The 'mensalidade' column (extract numeric part via regexp_replace(mensalidade, '[^0-9.]', '', 'g'))
+3. PRICE FILTERING: 
+   - STRICT INTENT: "até X" implies <=, "entre X e Y" implies BETWEEN, "a X e Y" implies IN (X, Y).
+   - If no operator is clear but price numbers exist, assume EXACT (IN) if multiple numbers, or LESS THAN OR EQUAL (<=) if one number.
+   - Use 'mensalidade' column (numeric extraction: NULLIF(regexp_replace(e.mensalidade, '[^0-9.]', '', 'g'), '')::numeric)
    - AND/OR the 'oferta' JSONB array.
-   Example for 10€: (NULLIF(regexp_replace(e.mensalidade, '[^0-9.]', '', 'g'), '')::numeric <= 10 OR EXISTS (SELECT 1 FROM jsonb_array_elements(e.oferta) as o WHERE (o->>'preco')::numeric <= 10))
-4. LOCATION FILTERING: Use a SPATIAL JOIN with "Limites_Freguesia_WGS84" (f) when specific localities are mentioned (Feijó, Charneca, Piedade, Pragal). Join on ST_Intersects(e.geom, f.geom).
-   - "Charneca de Caparica" matches f.nome ILIKE '%Charneca%'.
-5. Always combine filters with AND (Conjunctive search).
-6. Na explicação, confirma os parâmetros: "Pesquisando por [modalidade] em [localidade] com valor até [preço]€".
-7. Always ensure the "geom" column from the entities is selected.
-8. Robustness: The client uses accent-insensitive matching.
+   Example Exact List (10, 15): ((NULLIF(regexp_replace(e.mensalidade, '[^0-9.]', '', 'g'), '')::numeric IN (10, 15)) OR EXISTS (SELECT 1 FROM jsonb_array_elements(e.oferta) as o WHERE (o->>'preco')::numeric IN (10, 15)))
+   Example Range (10-15): ((temp_price BETWEEN 10 AND 15) OR EXISTS(... preco BETWEEN 10 AND 15))
+4. MULTIPLE ACTIVITIES: If many sports are requested (e.g. "vólei e futebol"), use (e.modalidade ILIKE '%futebol%' OR e.modalidade ILIKE '%volei%' OR ...)
+5. LOCATION FILTERING: Joins with "Limites_Freguesia_WGS84" (f) on ST_Intersects.
+6. Na explicação, confirma os parâmetros: "Pesquisando por [modalidade] com valor [preço]".
+8. ALWAYS ensure the "geom" column from the entities is selected.
+9. Robustness: Map verbs like "jogar", "treinar", "fazer", "querer", "praticar" to intent.
+10. Use ILIKE for all text comparisons.
 `;
 
 export interface AISqlResponse {
