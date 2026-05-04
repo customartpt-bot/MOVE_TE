@@ -105,8 +105,16 @@ export default function CommandPanel({
   const [query, setQuery] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [externalUrl, setExternalUrl] = useState('');
+  const [wmsUrl, setWmsUrl] = useState('');
+  const [wfsUrl, setWfsUrl] = useState('');
+  const [wmsLayers, setWmsLayers] = useState('');
+  const [wfsLayers, setWfsLayers] = useState('');
   const [isImporting, setIsImporting] = useState(false);
+  const [addressValue, setAddressValue] = useState('');
+  const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
+  const [modalitySuggestions, setModalitySuggestions] = useState<string[]>([]);
+  const [showModalityPopup, setShowModalityPopup] = useState(false);
+  const [showAddressPopup, setShowAddressPopup] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiExplanation, setAiExplanation] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'base' | 'data'>('base');
@@ -161,12 +169,18 @@ export default function CommandPanel({
   };
 
   const handleAddWFS = async () => {
-    if (!externalUrl) return;
+    if (!wfsUrl) return;
     setIsImporting(true);
     setError(null);
     try {
-      const urlObj = new URL(externalUrl);
+      const urlObj = new URL(wfsUrl);
       
+      // Update typeNames from the wfsLayers field if present
+      if (wfsLayers) {
+        urlObj.searchParams.set('typeName', wfsLayers);
+        urlObj.searchParams.set('typeNames', wfsLayers);
+      }
+
       // 1. Tentar obter os dados como estão ou forçar GetFeature se faltar o pedido
       if (!urlObj.searchParams.has('request')) {
         urlObj.searchParams.set('request', 'GetFeature');
@@ -223,7 +237,7 @@ export default function CommandPanel({
           // Processar GML do GetFeature
           processGML(featText, typeName);
         }
-        setExternalUrl('');
+        setWfsUrl('');
         return;
       }
 
@@ -239,12 +253,49 @@ export default function CommandPanel({
         processGML(text, `WFS: ${urlObj.host}`);
       }
 
-      setExternalUrl('');
+      setWfsUrl('');
+      setWfsLayers('');
     } catch (err: any) {
       console.error(err);
       setError(err.message || 'Erro ao importar WFS.');
     } finally {
       setIsImporting(false);
+    }
+  };
+
+  const fetchAddressSuggestions = async (val: string) => {
+    if (val.length < 3) {
+      setAddressSuggestions([]);
+      return;
+    }
+    try {
+      // Usar a API do Nominatim (OpenStreetMap) filtrada por Almada
+      const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(val + ', Almada, Portugal')}&limit=5&addressdetails=1`);
+      const data = await resp.json();
+      setAddressSuggestions(data);
+    } catch (e) {
+      console.error('Nominatim error:', e);
+    }
+  };
+
+  const knownModalities = [
+    'Futebol', 'Vólei', 'Basquetebol', 'Andebol', 'Ténis', 'Padel', 'Natação', 'Hidroginástica',
+    'Karaté', 'Judo', 'Taekwondo', 'Yoga', 'Pilates', 'Zumba', 'Ginásio', 'Musculação', 'Fitness',
+    'Crossfit', 'Ciclismo', 'Atletismo', 'Surf', 'Bodyboard', 'Skate', 'Patinagem', 'Dança', 'Ballet'
+  ];
+
+  const handleAiInputChange = (val: string) => {
+    setQuery(val);
+    const lastWord = val.split(/[\s,]+/).pop() || '';
+    if (lastWord.length > 1) {
+      const matches = knownModalities.filter(m => 
+        m.toLowerCase().startsWith(lastWord.toLowerCase()) || 
+        (m.toLowerCase().includes(lastWord.toLowerCase()) && lastWord.length > 2)
+      );
+      setModalitySuggestions(matches);
+      setShowModalityPopup(matches.length > 0);
+    } else {
+      setShowModalityPopup(false);
     }
   };
 
@@ -348,15 +399,29 @@ export default function CommandPanel({
     });
   };
 
-  const handleAddWMS = () => {
-    if (!externalUrl) return;
-    onAddExternalLayer({
-      id: `wms-${Date.now()}`,
-      name: `WMS: ${new URL(externalUrl).host}`,
-      type: 'wms',
-      url: externalUrl
-    });
-    setExternalUrl('');
+  const handleAddWMS = async () => {
+    if (!wmsUrl) return;
+    
+    setIsImporting(true);
+    setError(null);
+
+    try {
+      const urlObj = new URL(wmsUrl);
+      onAddExternalLayer({
+        id: `wms-${Date.now()}`,
+        name: `WMS: ${urlObj.host}`,
+        type: 'wms',
+        url: wmsUrl,
+        layers: wmsLayers || '0'
+      });
+      
+      setWmsUrl('');
+      setWmsLayers('');
+    } catch (e: any) {
+      setError(e.message || 'Erro ao importar camada WMS.');
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   const resetFilters = async () => {
@@ -399,26 +464,41 @@ export default function CommandPanel({
 
       const normalizedQuery = normalize(query);
       
-      // Detection for price filters (e.g. "até 15", "10€", "20 euros")
-      const priceMatch = query.match(/(\d+)[\s]*[€]|(\d+)[\s]*euros/i) || query.match(/(\d+)/);
+      // Detection for price filters (e.g. "até 15", "10€", "20 euros", "entre 10 e 15", "a 10€")
+      const priceNumbers = query.match(/\d+/g)?.map(Number) || [];
+      const isRangeIntent = normalizedQuery.includes('entre');
+      const isExactIntent = (normalizedQuery.includes(' a ') || normalizedQuery.includes(' exatamente ')) || 
+                            (!normalizedQuery.includes('ate') && !normalizedQuery.includes('menos') && !isRangeIntent && priceNumbers.length > 0);
+      
+      const targetPrice = priceNumbers.length > 0 ? (isRangeIntent ? null : priceNumbers[0]) : null;
+      const minPrice = isRangeIntent ? priceNumbers[0] : null;
+      const maxPrice = isRangeIntent ? priceNumbers[1] : null;
+
       const isPriceIntent = normalizedQuery.includes('ate') || 
                            normalizedQuery.includes('menos') || 
                            normalizedQuery.includes('maximo') ||
-                           query.includes('€') ||
+                           isRangeIntent ||
+                           isExactIntent ||
+                           query.includes('€') || 
                            normalizedQuery.includes('euro');
-                           
-      const targetPrice = priceMatch ? parseInt(priceMatch[1] || priceMatch[2] || priceMatch[0], 10) : null;
-      const isPriceFilter = targetPrice !== null && (isPriceIntent || targetPrice < 100); // Heuristic: numbers < 100 are likely prices
+                            
+      const isPriceFilter = (priceNumbers.length > 0) && (isPriceIntent || (targetPrice !== null && targetPrice < 100));
 
       // Extract meaningful keywords
-      const sanitizedQuery = normalizedQuery.replace(/[?.,!()[\]{}]/g, ' ');
-      const stopWords = ['onde', 'posso', 'praticar', 'ha', 'tem', 'existe', 'o', 'a', 'os', 'as', 'em', 'no', 'na', 'de', 'do', 'da', 'com', 'alguem', 'encontrar', 'um', 'uma', 'ate', 'euros', 'mensalidade', 'preco'];
+      const sanitizedQuery = normalizedQuery.replace(/[?.,!()[\]{}]/g, ' ').replace(/[€]/g, ' ');
+      const stopWords = [
+        'onde', 'posso', 'praticar', 'jogar', 'fazer', 'treinar', 'aula', 'aulas', 'querias', 'queria',
+        'ha', 'tem', 'existe', 'o', 'a', 'os', 'as', 'em', 'no', 'na', 'de', 'do', 'da', 
+        'com', 'alguem', 'encontrar', 'um', 'uma', 'ate', 'entre', 'euros', 'mensalidade', 'preco',
+        'quais', 'sao', 'os', 'melhores', 'proximo', 'perto', 'clube', 'clubes', 'ginasio', 'entidade',
+        'e', 'ou', 'para'
+      ];
       const keywords = sanitizedQuery
         .split(/\s+/)
         .filter(w => {
-          const isNum = !isNaN(Number(w));
-          if (isNum && targetPrice && Number(w) === targetPrice) return false;
-          return w.length > 2 && !stopWords.includes(w);
+          const num = Number(w);
+          if (!isNaN(num) && priceNumbers.includes(num)) return false;
+          return w.length > 1 && !stopWords.includes(w);
         });
       
       const searchTerms = keywords.length > 0 ? keywords : [];
@@ -431,13 +511,24 @@ export default function CommandPanel({
       
       const filtered = (data || []).filter(item => {
         // 1. Price filtering check
-        if (targetPrice !== null && isPriceFilter) {
+        if (isPriceFilter) {
           // Check summary field
           const itemPriceRaw = String(item.mensalidade || "").replace(/[^\d.]/g, '');
           const summaryPrice = parseFloat(itemPriceRaw);
           
+          const checkPrice = (p: number) => {
+            if (isRangeIntent && minPrice !== null && maxPrice !== null) {
+              return p >= minPrice && p <= maxPrice;
+            }
+            if (isExactIntent && priceNumbers.length > 0) {
+              // Check if it matches any of the mentioned prices exactly
+              return priceNumbers.includes(p);
+            }
+            return targetPrice !== null && p <= targetPrice;
+          };
+
           // Also check the oferta array if present
-          let hasPriceMatch = !isNaN(summaryPrice) && summaryPrice <= targetPrice;
+          let hasPriceMatch = !isNaN(summaryPrice) && checkPrice(summaryPrice);
           
           if (!hasPriceMatch && item.oferta) {
             try {
@@ -445,7 +536,7 @@ export default function CommandPanel({
               if (Array.isArray(offers)) {
                 hasPriceMatch = offers.some(o => {
                   const p = parseFloat(String(o.preco || "").replace(/[^\d.]/g, ''));
-                  return !isNaN(p) && p <= targetPrice;
+                  return !isNaN(p) && checkPrice(p);
                 });
               }
             } catch (e) { /* ignore */ }
@@ -467,59 +558,55 @@ export default function CommandPanel({
 
         // 2. Keyword/Search Terms filtering check
         if (searchTerms.length > 0) {
-          return searchTerms.every(term => {
+          // Heuristic: identify if we have multiple potential activity terms
+          const activities = ['futebol', 'volei', 'tenis', 'basquetebol', 'natacao', 'karate', 'judo', 'zumba', 'ginasio', 'fitness', 'yoga', 'padel', 'atletismo'];
+          const activityTerms = searchTerms.filter(t => activities.some(a => a.includes(t) || t.includes(a)));
+          const otherTerms = searchTerms.filter(t => !activityTerms.includes(t));
+
+          // Other terms (like locations) MUST match (AND)
+          const otherPass = otherTerms.every(term => {
             const t = term.trim();
             if (!t) return true;
             
             const targetFields = [
               { val: item.nome_clube, type: 'text' },
               { val: item.morada, type: 'location' },
-              { val: item.modalidade, type: 'text' },
-              { val: item.categoria, type: 'text' },
               { val: item.nome_freguesia, type: 'freguesia' },
               { val: item.nome_uniao_freguesia, type: 'freguesia' }
             ];
 
-            // Extract text from oferta array for matching
-            let ofertaText = '';
-            if (item.oferta) {
-              try {
-                const offers = typeof item.oferta === 'string' ? JSON.parse(item.oferta) : item.oferta;
-                if (Array.isArray(offers)) {
-                  ofertaText = offers.map(o => `${o.mod || ''}`).join(' ');
-                }
-              } catch (e) { /* ignore */ }
-            }
-            if (ofertaText) {
-              targetFields.push({ val: ofertaText, type: 'text' });
-            }
-
-            // Specific location sensitivity: if it's a known sub-locality, we should be more inclusive
-            const subLocalities = ['piedade', 'feijo', 'laranjeiro', 'cacilhas', 'pragal', 'almada', 'costa', 'trafaria', 'caparica', 'sobreda', 'charneca'];
-            const isSubLocalityTerm = subLocalities.includes(t);
-
-            return targetFields.some(field => {
-              if (!field.val) return false;
-              const nVal = normalize(field.val);
-              const matches = nVal.includes(t);
-              
-              if (matches && isSubLocalityTerm && field.type === 'freguesia') {
-                const isUnion = nVal.includes(' e ') || nVal.includes(',') || nVal.includes('uniao');
-                if (isUnion) {
-                  // Only restrict if the address clearly points to a different sub-locality within the same union
-                  const otherSubLocalitiesInUnion = subLocalities.filter(s => s !== t && nVal.includes(s));
-                  const moradaMatchesAnother = otherSubLocalitiesInUnion.some(s => item.morada && normalize(item.morada).includes(s));
-                  const moradaMatchesThis = item.morada && normalize(item.morada).includes(t);
-
-                  // If address confirms the OTHER part of the union, then we exclude.
-                  // Otherwise (no address, or address confirms this part), we allow.
-                  if (moradaMatchesAnother && !moradaMatchesThis) return false;
-                }
-              }
-              
-              return matches;
-            });
+            return targetFields.some(field => field.val && normalize(field.val).includes(t));
           });
+
+          if (!otherPass) return false;
+
+          // Activity terms match (OR) if multiple are present
+          if (activityTerms.length > 0) {
+            return activityTerms.some(term => {
+              const t = term.trim();
+              if (!t) return false;
+              
+              const targetFields = [
+                { val: item.nome_clube, type: 'text' },
+                { val: item.modalidade, type: 'text' },
+                { val: item.categoria, type: 'text' }
+              ];
+
+              let hasInOferta = false;
+              if (item.oferta) {
+                try {
+                  const offers = typeof item.oferta === 'string' ? JSON.parse(item.oferta) : item.oferta;
+                  if (Array.isArray(offers)) {
+                    hasInOferta = offers.some(o => normalize(o.mod || "").includes(t));
+                  }
+                } catch (e) { /* ignore */ }
+              }
+
+              return targetFields.some(field => field.val && normalize(field.val).includes(t)) || hasInOferta;
+            });
+          }
+
+          return true;
         }
 
         // Default: If it was a price filter without keywords and passed above, it included.
@@ -589,8 +676,15 @@ export default function CommandPanel({
         <div className="relative group">
           <input
             type="text"
+            value={addressValue}
             placeholder="Pesquisar morada em Almada..."
             className="w-full bg-pearl border border-gray-200 py-2 pl-3 pr-10 text-[11px] focus:outline-none focus:ring-1 focus:ring-dark-ink transition-all font-medium"
+            onChange={(e) => {
+              setAddressValue(e.target.value);
+              fetchAddressSuggestions(e.target.value);
+              setShowAddressPopup(true);
+            }}
+            onBlur={() => setTimeout(() => setShowAddressPopup(false), 200)}
             onKeyDown={async (e) => {
               if (e.key === 'Enter') {
                 const val = (e.target as HTMLInputElement).value;
@@ -609,6 +703,34 @@ export default function CommandPanel({
             }}
           />
           <Search size={14} className="absolute right-3 top-2.5 text-gray-400 group-focus-within:text-dark-ink" />
+
+          {/* Address Suggestion Popup */}
+          <AnimatePresence>
+            {showAddressPopup && addressSuggestions.length > 0 && (
+              <motion.div 
+                initial={{ opacity: 0, y: -5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -5 }}
+                className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-dark-ink/10 shadow-xl rounded-sm overflow-hidden max-h-[160px] overflow-y-auto"
+              >
+                {addressSuggestions.map((addr, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => {
+                      setAddressValue(addr.display_name);
+                      window.dispatchEvent(new CustomEvent('map-fly-to', { detail: { lat: parseFloat(addr.lat), lon: parseFloat(addr.lon) } }));
+                      setShowAddressPopup(false);
+                    }}
+                    className="w-full text-left px-2 py-2 text-[9px] hover:bg-tech-green/5 border-b border-gray-50 last:border-0 leading-tight"
+                  >
+                    <div className="font-semibold text-dark-ink truncate">{addr.display_name.split(',')[0]}</div>
+                    <div className="text-gray-400 truncate opacity-70">{addr.display_name.split(',').slice(1).join(',')}</div>
+                  </button>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </section>
 
@@ -630,10 +752,41 @@ export default function CommandPanel({
             <input
               type="text"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => handleAiInputChange(e.target.value)}
+              onBlur={() => setTimeout(() => setShowModalityPopup(false), 200)}
               placeholder="Onde praticar zumba..."
               className="w-full bg-pearl border-b-2 border-dark-ink/10 py-2 text-[13px] font-medium focus:outline-none focus:border-tech-green transition-all placeholder:text-gray-300 pr-16"
             />
+
+            {/* Modality Suggestion Popup */}
+            <AnimatePresence>
+              {showModalityPopup && modalitySuggestions.length > 0 && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-dark-ink/10 shadow-xl rounded-sm overflow-hidden"
+                >
+                  {modalitySuggestions.map((m, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => {
+                        const words = query.split(/[\s,]+/);
+                        words.pop();
+                        setQuery([...words, m].join(' ') + ' ');
+                        setShowModalityPopup(false);
+                      }}
+                      className="w-full text-left px-3 py-2 text-[10px] hover:bg-tech-green/10 flex items-center justify-between border-b border-gray-50 last:border-0"
+                    >
+                      <span className="font-medium text-dark-ink">{m}</span>
+                      <span className="text-[8px] text-gray-400 uppercase tracking-tighter">Modalidade</span>
+                    </button>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <div className="absolute right-0 top-0 flex items-center h-full gap-1">
               <button
                 type="button"
@@ -742,6 +895,73 @@ export default function CommandPanel({
                 exit={{ opacity: 0, x: -10 }}
                 className="space-y-4"
               >
+                {/* External Import Section */}
+                <div className="bg-pearl/50 border border-dark-ink/5 p-3 rounded-sm space-y-4">
+                  <p className="text-[10px] font-bold text-dark-ink uppercase tracking-widest border-b border-dark-ink/5 pb-1">Importar OGC</p>
+                  
+                  {/* WMS Section */}
+                  <div className="space-y-2">
+                    <label className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Serviço WMS</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        placeholder="URL do WMS..."
+                        value={wmsUrl}
+                        onChange={(e) => setWmsUrl(e.target.value)}
+                        className="flex-1 bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
+                      />
+                      <button 
+                        onClick={() => handleAddWMS()}
+                        disabled={isImporting}
+                        className="bg-dark-ink text-pearl text-[9px] font-bold px-3 py-1.5 uppercase hover:bg-tech-green hover:text-dark-ink transition-all disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <input 
+                      type="text" 
+                      placeholder="Camadas WMS (ex: 0,1,2)..."
+                      value={wmsLayers}
+                      onChange={(e) => setWmsLayers(e.target.value)}
+                      className="w-full bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
+                    />
+                  </div>
+
+                  {/* WFS Section */}
+                  <div className="space-y-2">
+                    <label className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Serviço WFS</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        placeholder="URL do WFS..."
+                        value={wfsUrl}
+                        onChange={(e) => setWfsUrl(e.target.value)}
+                        className="flex-1 bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
+                      />
+                      <button 
+                        onClick={() => handleAddWFS()}
+                        disabled={isImporting}
+                        className="bg-dark-ink text-pearl text-[9px] font-bold px-3 py-1.5 uppercase hover:bg-tech-green hover:text-dark-ink transition-all disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <input 
+                      type="text" 
+                      placeholder="Tipo de Objeto WFS (typeNames)..."
+                      value={wfsLayers}
+                      onChange={(e) => setWfsLayers(e.target.value)}
+                      className="w-full bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
+                    />
+                  </div>
+                  
+                  {error && (
+                    <div className="flex items-center gap-1 text-[9px] font-bold text-red-500 uppercase tracking-tighter bg-red-50 p-2 border border-red-100">
+                      <AlertCircle size={10} /> <span>{error}</span>
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-4">
                   <div className="pt-2">
                     <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 px-1">Conjuntos Disponíveis</p>
