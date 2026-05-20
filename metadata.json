@@ -1,6 +1,6 @@
 {
   "name": "MOVE_TE - Almada Desporto",
-  "description": "Visualizador inteligente da oferta desportiva de Almada com IA e consultas geoespaciais PostGIS.",
-  "requestFramePermissions": ["microphone"],
+  "description": "Visualizador inteligente e consola de comando para a oferta desportiva de Almada, com integração PostGIS, camadas WMS/WFS e assistente IA.",
+  "requestFramePermissions": [],
   "majorCapabilities": ["Geospatial Analysis", "AI-Powered Querying"]
 }
