@@ -1,100 +1,68 @@
 -- Habilita PostGIS para suporte geoespacial
 CREATE EXTENSION IF NOT EXISTS postgis;
 
--- WARNING: This schema is for context only and is not meant to be run.
--- Table order and constraints may not be valid for execution.
+-- Tabela de Freguesias (CAOP Almada)
+CREATE TABLE freguesias (
+    id SERIAL PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    geom GEOMETRY(MultiPolygon, 4326)
+);
 
-CREATE TABLE public.DESP_CLUBE_MODALIDADE (
-  id character varying NOT NULL,
-  id_clube bigint,
-  id_modalidade bigint,
-  mensalidade character varying,
-  CONSTRAINT DESP_CLUBE_MODALIDADE_pkey PRIMARY KEY (id),
-  CONSTRAINT DESP_CLUBE_MODALIDADE_id_clube_fkey FOREIGN KEY (id_clube) REFERENCES public.Entidades_Desportivas(id),
-  CONSTRAINT DESP_CLUBE_MODALIDADE_id_modalidade_fkey FOREIGN KEY (id_modalidade) REFERENCES public.DESP_MODALIDADE(id_modalidade)
+-- Tabela de Clubes/Entidades
+CREATE TABLE clubes (
+    id SERIAL PRIMARY KEY,
+    nome VARCHAR(255) NOT NULL,
+    morada TEXT,
+    website TEXT,
+    geom GEOMETRY(Point, 4326),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
-CREATE TABLE public.DESP_MODALIDADE (
-  id bigint NOT NULL,
-  id_modalidade bigint NOT NULL UNIQUE,
-  modalidade character varying,
-  categoria character varying,
-  CONSTRAINT DESP_MODALIDADE_pkey PRIMARY KEY (id_modalidade)
+
+-- Tabela de Modalidades
+CREATE TABLE modalidades (
+    id SERIAL PRIMARY KEY,
+    nome VARCHAR(100) UNIQUE NOT NULL
 );
-CREATE TABLE public.Entidades_Desportivas (
-  id bigint NOT NULL,
-  geom USER-DEFINED,
-  nome_clube character varying,
-  morada character varying,
-  freguesia bigint,
-  localidade bigint,
-  cod_postal character varying,
-  email character varying,
-  website character varying,
-  telefone character varying,
-  latitude numeric,
-  longitude numeric,
-  observacoe character varying,
-  dataregist date,
-  registadop character varying,
-  dataatuali date NOT NULL,
-  atualizado character varying NOT NULL,
-  CONSTRAINT Entidades_Desportivas_pkey PRIMARY KEY (id)
+
+-- Tabela de Oferta Desportiva (Ligação Clube-Modalidade com Horários e Preços)
+CREATE TABLE oferta_desportiva (
+    id SERIAL PRIMARY KEY,
+    clube_id INTEGER REFERENCES clubes(id) ON DELETE CASCADE,
+    modalidade_id INTEGER REFERENCES modalidades(id) ON DELETE CASCADE,
+    horario TEXT, -- Ex: "Seg e Qua 18h-19h"
+    mensalidade NUMERIC(10, 2), -- Preço em Euros
+    idade_min INTEGER,
+    idade_max INTEGER,
+    observacoes TEXT
 );
-CREATE TABLE public.Limite_Concelho_WGS84 (
-  id bigint NOT NULL,
-  geom USER-DEFINED,
-  data_criac date,
-  cod_conc_i character varying,
-  area_digit numeric,
-  data_digit date,
-  html character varying,
-  imagem character varying,
-  som character varying,
-  video character varying,
-  cad character varying,
-  documentos character varying,
-  designacao character varying,
-  login character varying,
-  CONSTRAINT Limite_Concelho_WGS84_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.Limite_UniaoFreguesias_WGS84 (
-  id integer NOT NULL DEFAULT nextval('"Limite_UniaoFreguesias_WGS84_id_seq"'::regclass),
-  geom USER-DEFINED,
-  designacao character varying,
-  sede character varying,
-  dicofre character varying,
-  area_digit numeric,
-  data_criac character varying,
-  desig_simp character varying,
-  id1 bigint,
-  login character varying,
-  cod_freg character varying,
-  CONSTRAINT Limite_UniaoFreguesias_WGS84_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.Limites_Freguesia_WGS84 (
-  id bigint NOT NULL,
-  geom USER-DEFINED,
-  designacao character varying,
-  cod_freg_i character varying,
-  area_digit numeric,
-  data_digit date,
-  html character varying,
-  imagem character varying,
-  som character varying,
-  video character varying,
-  cad character varying,
-  documentos character varying,
-  cod_freg bigint,
-  data_criac character varying,
-  login character varying,
-  iduniaofre integer,
-  CONSTRAINT Limites_Freguesia_WGS84_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.spatial_ref_sys (
-  srid integer NOT NULL CHECK (srid > 0 AND srid <= 998999),
-  auth_name character varying,
-  auth_srid integer,
-  srtext character varying,
-  proj4text character varying,
-  CONSTRAINT spatial_ref_sys_pkey PRIMARY KEY (srid)
-);
+
+-- RLS (Row Level Security) - Permitir leitura pública
+ALTER TABLE freguesias ENABLE ROW LEVEL SECURITY;
+ALTER TABLE clubes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE modalidades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE oferta_desportiva ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public read" ON freguesias FOR SELECT USING (true);
+CREATE POLICY "Allow public read" ON clubes FOR SELECT USING (true);
+CREATE POLICY "Allow public read" ON modalidades FOR SELECT USING (true);
+CREATE POLICY "Allow public read" ON oferta_desportiva FOR SELECT USING (true);
+
+-- Índices Espaciais
+CREATE INDEX idx_freguesias_geom ON freguesias USING GIST (geom);
+CREATE INDEX idx_clubes_geom ON clubes USING GIST (geom);
+
+-- View para facilitar consultas da IA (Flattened Data)
+CREATE OR REPLACE VIEW v_oferta_completa AS
+SELECT 
+    o.id as oferta_id,
+    c.nome as clube_nome,
+    c.morada as clube_morada,
+    m.nome as modalidade_nome,
+    o.horario,
+    o.mensalidade,
+    f.nome as freguesia_nome,
+    c.geom as clube_localizacao
+FROM oferta_desportiva o
+JOIN clubes c ON o.clube_id = c.id
+JOIN modalidades m ON o.modalidade_id = m.id
+LEFT JOIN freguesias f ON ST_Intersects(c.geom, f.geom);
