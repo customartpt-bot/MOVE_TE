@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import Map from './components/Map';
 import CommandPanel from './components/CommandPanel';
+import FloatingAI from './components/FloatingAI';
 import { AttributeTable } from './components/AttributeTable';
 import { supabase } from './lib/supabase';
 import { motion } from 'motion/react';
@@ -17,6 +18,7 @@ const CATALOG_LAYERS = [
 export default function App() {
   const [results, setResults] = useState<any[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [aiExplanation, setAiExplanation] = useState<string | null>(null);
   
   const [importedLayerIds, setImportedLayerIds] = useState<string[]>([]);
   const [visibleLayerIds, setVisibleLayerIds] = useState<string[]>([]);
@@ -26,17 +28,22 @@ export default function App() {
 
   // Combined data for the map (Ordered for GIS: first in list = top of map)
   const activeLayers = useMemo(() => {
-    // 1. Get the catalog layers in the order specified by importedLayerIds
-    const sortedCatalog = importedLayerIds
-      .map(id => CATALOG_LAYERS.find(l => l.id === id))
-      .filter((l): l is typeof CATALOG_LAYERS[number] => !!l);
+    // Combine catalog layers and external layers to map over the exact active sorting order
+    const allAvailable = [...CATALOG_LAYERS, ...externalLayers];
+    
+    const sortedLayers = importedLayerIds
+      .map(id => {
+        const layer = allAvailable.find(l => l.id === id);
+        if (!layer) return null;
+        
+        if (layer.type === 'geojson_db') {
+          return { ...layer, type: 'geojson', data: dbGeoJsonData[layer.id] };
+        }
+        return layer;
+      })
+      .filter((l): l is any => l !== null);
 
-    // 2. Combine with external layers
-    return [
-      ...sortedCatalog
-        .map(l => l.type === 'geojson_db' ? { ...l, type: 'geojson', data: dbGeoJsonData[l.id] } : l),
-      ...externalLayers.filter(l => visibleLayerIds.includes(l.id))
-    ].filter(l => {
+    return sortedLayers.filter(l => {
       // Only keep layers that are visible AND have data if they are geojson
       if (!visibleLayerIds.includes(l.id)) return false;
       if (l.type === 'geojson' && !l.data) return false;
@@ -122,31 +129,48 @@ export default function App() {
 
   useEffect(() => {
     async function fetchInitialData() {
-      try {
-        // Fetch from the new view
-        const { data, error } = await supabase
-          .from('vw_entidades_completa')
-          .select('*');
-        
-        if (error) {
-          // Fallback to table if view doesn't exist yet
-          const { data: tableData, error: tableError } = await supabase
-            .from('Entidades_Desportivas')
-            .select('*, geom');
-          if (tableError) throw tableError;
-          setResults(tableData || []);
-        } else {
-          setResults(data || []);
-        }
-      } catch (err) {
-        console.error('Error fetching initial data:', err);
-      } finally {
-        setInitialLoading(false);
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+      const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+      if (typeof (window as any).carregarClubesDoSupabase === 'function') {
+        (window as any).carregarClubesDoSupabase(supabaseUrl, supabaseKey, (err: any, data: any) => {
+          if (!err && data) {
+            setResults(data);
+          } else {
+            console.error('Error in custom script fetch:', err);
+            // Fallback
+            supabase.from('vw_entidades_completa').select('*').then(({ data: d }) => {
+              if (d) setResults(d);
+            });
+          }
+          setInitialLoading(false);
+        });
+      } else {
+        // Fallback
+        supabase.from('vw_entidades_completa').select('*').then(({ data: d }) => {
+          if (d) setResults(d);
+          setInitialLoading(false);
+        });
       }
     }
 
     fetchInitialData();
   }, []);
+
+    const resetFilters = async () => {
+    setAiExplanation(null);
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+    if (typeof (window as any).carregarClubesDoSupabase === 'function') {
+      (window as any).carregarClubesDoSupabase(supabaseUrl, supabaseKey, (err: any, data: any) => {
+        if (!err && data) setResults(data);
+      });
+    } else {
+      const { data } = await supabase.from('vw_entidades_completa').select('*');
+      if (data) setResults(data);
+    }
+  };
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-pearl p-0 relative">
@@ -170,9 +194,11 @@ export default function App() {
           <CommandPanel 
             onResultsUpdate={setResults} 
             resultsCount={results.length} 
-            availableLayers={CATALOG_LAYERS}
+            availableLayers={[...CATALOG_LAYERS, ...externalLayers]}
             importedLayerIds={importedLayerIds}
             visibleLayerIds={visibleLayerIds}
+            aiExplanation={aiExplanation}
+            onResetFilters={resetFilters}
             onToggleImport={(id) => {
               setImportedLayerIds(prev => 
                 prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
@@ -205,10 +231,18 @@ export default function App() {
                 <p className="text-xs font-mono text-dark-ink/40 animate-pulse uppercase tracking-widest">Sincronizando PostGIS...</p>
               </div>
             ) : (
-              <Map 
-                data={visibleLayerIds.includes('desp_clubes') ? results : []} 
-                activeLayers={activeLayers}
-              />
+              <>
+                <Map 
+                  data={visibleLayerIds.includes('desp_clubes') ? results : []} 
+                  activeLayers={activeLayers}
+                />
+                {!isTableOpen && (
+                  <FloatingAI 
+                    onResultsUpdate={setResults} 
+                    onExplanationUpdate={setAiExplanation} 
+                  />
+                )}
+              </>
             )}
 
             {/* Floating Table Toggle */}
