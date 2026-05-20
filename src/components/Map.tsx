@@ -12,11 +12,32 @@ const DefaultIcon = L.icon({
   iconUrl: markerIcon,
   iconRetinaUrl: markerIconRetina,
   shadowUrl: markerShadow,
-  iconSize: [20, 32], // Reduced from [25, 41]
-  iconAnchor: [10, 32], // Adjusted for new size
+  iconSize: [20, 32], 
+  iconAnchor: [10, 32],
+});
+
+const RedIcon = L.icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+  shadowUrl: markerShadow,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41]
 });
 
 L.Marker.prototype.options.icon = DefaultIcon;
+
+// Helper component to add/remove a raw pre-instantiated Leaflet layer
+function LeafletLayerWrapper({ layerInstance }: { layerInstance: L.Layer }) {
+  const map = useMap();
+  useEffect(() => {
+    layerInstance.addTo(map);
+    return () => {
+      map.removeLayer(layerInstance);
+    };
+  }, [map, layerInstance]);
+  return null;
+}
 
 interface MapProps {
   data: any[];
@@ -28,7 +49,8 @@ const groupDataByEntity = (data: any[]) => {
   const groups: { [key: string]: any } = {};
   
   data.forEach(item => {
-    const id = item.clube_id || item.nome_clube || item.clube_nome;
+    // Robust ID selection: prioritize id from the view, then specialized ids
+    const id = item.id || item.clube_id || item.qgis_id || item.nome_clube || item.clube_nome;
     if (!groups[id]) {
       groups[id] = {
         ...item,
@@ -52,6 +74,7 @@ const groupDataByEntity = (data: any[]) => {
 
 export default function Map({ data, activeLayers = [] }: MapProps) {
   const [bounds, setBounds] = useState<L.LatLngBoundsExpression | null>(null);
+  const [searchMarker, setSearchMarker] = useState<[number, number] | null>(null);
 
   return (
     <div className="w-full h-full relative z-0 map-container-bold">
@@ -61,7 +84,13 @@ export default function Map({ data, activeLayers = [] }: MapProps) {
         scrollWheelZoom={true} 
         className="w-full h-full"
       >
-        <MapEventsHandler data={data} bounds={bounds} setBounds={setBounds} activeLayers={activeLayers} />
+        <MapEventsHandler 
+          data={data} 
+          bounds={bounds} 
+          setBounds={setBounds} 
+          activeLayers={activeLayers} 
+          setSearchMarker={setSearchMarker} 
+        />
         <LayersControl position="topright">
           <LayersControl.BaseLayer checked name="Mapa (OpenStreetMap)">
             <TileLayer
@@ -90,67 +119,91 @@ export default function Map({ data, activeLayers = [] }: MapProps) {
               url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             />
           </LayersControl.BaseLayer>
+
+          {/* Overlays (Camadas de Sobreposição) dinâmicas adicionadas ao controlo */}
+          {[...activeLayers].reverse().map((layer) => {
+            if (layer.type === 'geojson') {
+              const styles: Record<string, any> = {
+                adm_concelho: { color: '#000000', weight: 3, fillOpacity: 0.1 },
+                adm_uniao_freguesias: { color: '#FFFFFF', weight: 1.5, fillOpacity: 0.05 },
+                adm_freguesia: { color: '#FF0000', weight: 1.5, fillOpacity: 0.1 }
+              };
+              const defaultStyle = { color: '#00CC00', weight: 2, fillOpacity: 0.2 };
+              const layerStyle = styles[layer.id] || defaultStyle;
+
+              if (!layer.data || !layer.data.features || layer.data.features.length === 0) return null;
+
+              return (
+                <LayersControl.Overlay checked name={layer.name || layer.id} key={layer.id}>
+                  <GeoJSON 
+                    key={layer.id}
+                    data={layer.data} 
+                    style={layerStyle}
+                    onEachFeature={(feature, leafletLayer) => {
+                      if (feature.properties) {
+                        const title = layer.name || 'Atributos';
+                        leafletLayer.bindPopup(`
+                          <div class="p-2 font-sans overflow-hidden">
+                            <h4 class="font-black text-dark-ink border-b-2 border-dark-ink pb-1 mb-2 uppercase text-[10px] tracking-tight">${title}</h4>
+                            <div class="max-h-[150px] overflow-y-auto custom-scrollbar text-[9px]">
+                              ${Object.entries(feature.properties).map(([k, v]) => {
+                                if (!v || typeof v === 'object' || k.toLowerCase().includes('geom')) return '';
+                                return `
+                                  <div class="flex flex-col py-1 border-b border-dark-ink/5">
+                                    <span class="text-gray-400 font-mono uppercase text-[7px]">${k.replace(/_/g, ' ')}</span>
+                                    <span class="font-bold text-dark-ink truncate">${v}</span>
+                                  </div>
+                                `;
+                              }).join('')}
+                            </div>
+                          </div>
+                        `, { maxWidth: 240 });
+                      }
+                    }}
+                  />
+                </LayersControl.Overlay>
+              );
+            }
+            if (layer.type === 'wms') {
+              if (layer.wmsInstance) {
+                // Se o utilizador importou a camada e gerou a instância pelo importarDadosWMS (WMS 1.3.0 com CRS:4326/CRS:84)
+                return (
+                  <LayersControl.Overlay checked name={layer.name || layer.id} key={layer.id}>
+                    <LeafletLayerWrapper layerInstance={layer.wmsInstance} />
+                  </LayersControl.Overlay>
+                );
+              }
+              return (
+                <LayersControl.Overlay checked name={layer.name || layer.id} key={layer.id}>
+                  <WMSTileLayer
+                    key={layer.id}
+                    url={layer.url}
+                    params={{
+                      layers: layer.layers || '0',
+                      format: 'image/png',
+                      transparent: true,
+                      version: '1.3.0',
+                      crs: L.CRS.EPSG4326,
+                      tiled: true
+                    } as any}
+                  />
+                </LayersControl.Overlay>
+              );
+            }
+            return null;
+          })}
         </LayersControl>
 
-        {/* Render Layers (Reversed because in Leaflet the last rendered layer is on top) */}
-        {[...activeLayers].reverse().map((layer) => {
-          if (layer.type === 'geojson') {
-            const styles: Record<string, any> = {
-              adm_concelho: { color: '#000000', weight: 3, fillOpacity: 0.1 },
-              adm_uniao_freguesias: { color: '#FFFFFF', weight: 1.5, fillOpacity: 0.05 },
-              adm_freguesia: { color: '#FF0000', weight: 1.5, fillOpacity: 0.1 }
-            };
-            const defaultStyle = { color: '#00CC00', weight: 2, fillOpacity: 0.2 };
-            const layerStyle = styles[layer.id] || defaultStyle;
-
-            if (!layer.data || !layer.data.features || layer.data.features.length === 0) return null;
-
-            return (
-              <GeoJSON 
-                key={layer.id}
-                data={layer.data} 
-                style={layerStyle}
-                onEachFeature={(feature, leafletLayer) => {
-                  if (feature.properties) {
-                    const title = layer.name || 'Atributos';
-                    leafletLayer.bindPopup(`
-                      <div class="p-2 font-sans overflow-hidden">
-                        <h4 class="font-black text-dark-ink border-b-2 border-dark-ink pb-1 mb-2 uppercase text-[10px] tracking-tight">${title}</h4>
-                        <div class="max-h-[150px] overflow-y-auto custom-scrollbar text-[9px]">
-                          ${Object.entries(feature.properties).map(([k, v]) => {
-                            if (!v || typeof v === 'object' || k.toLowerCase().includes('geom')) return '';
-                            return `
-                              <div class="flex flex-col py-1 border-b border-dark-ink/5">
-                                <span class="text-gray-400 font-mono uppercase text-[7px]">${k.replace(/_/g, ' ')}</span>
-                                <span class="font-bold text-dark-ink truncate">${v}</span>
-                              </div>
-                            `;
-                          }).join('')}
-                        </div>
-                      </div>
-                    `, { maxWidth: 240 });
-                  }
-                }}
-              />
-            );
-          }
-          if (layer.type === 'wms') {
-            return (
-              <WMSTileLayer
-                key={layer.id}
-                url={layer.url}
-                params={{
-                  layers: layer.layers || '0',
-                  format: 'image/png',
-                  transparent: true,
-                  version: '1.1.0',
-                  tiled: true
-                } as any}
-              />
-            );
-          }
-          return null;
-        })}
+        {/* Search Marker */}
+        {searchMarker && (
+          <Marker position={searchMarker} icon={RedIcon}>
+            <Popup>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-red-600">
+                Localização Pesquisada
+              </div>
+            </Popup>
+          </Marker>
+        )}
         
         {/* Markers usually go in top pane automatically */}
         {groupDataByEntity(data).map((item, idx) => {
@@ -240,19 +293,41 @@ export default function Map({ data, activeLayers = [] }: MapProps) {
   );
 }
 
-function MapEventsHandler({ data, bounds, setBounds, activeLayers }: { data: any[], bounds: L.LatLngBoundsExpression | null, setBounds: (b: any) => void, activeLayers: any[] }) {
+function MapEventsHandler({ data, bounds, setBounds, activeLayers, setSearchMarker }: { data: any[], bounds: L.LatLngBoundsExpression | null, setBounds: (b: any) => void, activeLayers: any[], setSearchMarker: (pos: [number, number] | null) => void }) {
   const map = useMap();
 
   // Fit bounds for markers
   useEffect(() => {
     const handleFlyTo = (e: any) => {
       const { lat, lon } = e.detail;
+      setSearchMarker([lat, lon]);
       map.flyTo([lat, lon], 17, { duration: 2 });
     };
 
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Avoid shortcuts if user is typing in an input
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 'a') {
+        // A - Almada Center
+        map.flyTo([38.676, -9.162], 14, { duration: 1.5 });
+      } else if (key === 's') {
+        // S - Satellite View (Simulate clicking the layers control or just dispatch)
+        window.dispatchEvent(new CustomEvent('map-set-view', { detail: 'satellite' }));
+      } else if (key === 'd') {
+        // D - Default Map View
+        window.dispatchEvent(new CustomEvent('map-set-view', { detail: 'default' }));
+      }
+    };
+
     window.addEventListener('map-fly-to', handleFlyTo);
-    return () => window.removeEventListener('map-fly-to', handleFlyTo);
-  }, [map]);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('map-fly-to', handleFlyTo);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [map, setSearchMarker]);
 
   // Fit bounds for GeoJSON layers
   useEffect(() => {
