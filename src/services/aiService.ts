@@ -46,23 +46,68 @@ RULES:
 export interface AISqlResponse {
   sql: string;
   explanation: string;
+  intents: {
+    modalities: string[];
+    locations: string[];
+    min_price?: number;
+    max_price?: number;
+    exact_prices?: number[];
+  };
 }
 
 export async function translateToSQL(query: string): Promise<AISqlResponse> {
+  const PROMPT_WITH_EXAMPLES = `
+    ${SYSTEM_PROMPT}
+    
+    INTENT EXTRACTION RULES:
+    - "modalities": Array of strings (e.g., ["futebol", "andebol"]).
+    - "locations": Array of strings. Extract only the place name (e.g., "Caparica", "Laranjeiro"). Remove prefixes like "freguesia de", "união de freguesias", "concelho".
+    - "min_price": Number if "desde", "entre X e Y" (X), or "> X".
+    - "max_price": Number if "até", "máximo", "entre X e Y" (Y), or "< X".
+    - "exact_prices": Array if specific values mentioned (e.g., "por 10€ ou 15€").
+
+    FEW-SHOT EXAMPLES:
+    1. Query: "Onde posso praticar futebol na Caparica?" 
+       Result: { "sql": "...", "explanation": "Pesquisando futebol na Caparica...", "intents": { "modalities": ["futebol"], "locations": ["Caparica"] } }
+    
+    2. Query: "Modalidades no Laranjeiro ate 20€" 
+       Result: { "sql": "...", "explanation": "Pesquisando modalidades no Laranjeiro até 20€...", "intents": { "modalities": [], "locations": ["Laranjeiro"], "max_price": 20 } }
+    
+    3. Query: "Onde posso praticar futebol ou andebol?" 
+       Result: { "sql": "...", "explanation": "Pesquisando futebol ou andebol...", "intents": { "modalities": ["futebol", "andebol"], "locations": [] } }
+    
+    4. Query: "basquetebol entre 10 e 20€ em Almada" 
+       Result: { "sql": "...", "explanation": "Pesquisando basquetebol em Almada entre 10€ e 20€...", "intents": { "modalities": ["basquetebol"], "locations": ["Almada"], "min_price": 10, "max_price": 20 } }
+
+    5. Query: "Mostra-me modalidades na freguesia da Sobreda"
+       Result: { "sql": "...", "explanation": "Filtrando modalidades na freguesia da Sobreda...", "intents": { "modalities": [], "locations": ["Sobreda"] } }
+  `;
+
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: query,
       config: {
-        systemInstruction: SYSTEM_PROMPT,
+        systemInstruction: PROMPT_WITH_EXAMPLES,
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             sql: { type: Type.STRING },
-            explanation: { type: Type.STRING }
+            explanation: { type: Type.STRING },
+            intents: {
+              type: Type.OBJECT,
+              properties: {
+                modalities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                locations: { type: Type.ARRAY, items: { type: Type.STRING } },
+                min_price: { type: Type.NUMBER },
+                max_price: { type: Type.NUMBER },
+                exact_prices: { type: Type.ARRAY, items: { type: Type.NUMBER } }
+              },
+              required: ["modalities", "locations"]
+            }
           },
-          required: ["sql", "explanation"]
+          required: ["sql", "explanation", "intents"]
         }
       },
     });
@@ -75,7 +120,64 @@ export async function translateToSQL(query: string): Promise<AISqlResponse> {
     console.error("AI Translation Error:", error);
     return {
       sql: "",
-      explanation: "Desculpe, não consegui processar o seu pedido técnico neste momento."
+      explanation: "Desculpe, não consegui processar o seu pedido técnico neste momento.",
+      intents: { modalities: [], locations: [] }
     };
+  }
+}
+
+export interface GeocodeResponse {
+  features: {
+    display_name: string;
+    lat: number;
+    lon: number;
+  }[];
+}
+
+export async function geocodeAddress(query: string): Promise<GeocodeResponse> {
+  const GEO_PROMPT = `
+    You are a geocoding engine for Almada, Portugal.
+    Given a local address or street name, return its approximate GPS coordinates (WGS84).
+    Query: "${query}"
+    
+    Return a JSON object with a "features" array.
+    Each feature has: "display_name", "lat" (number), "lon" (number).
+    Focus strictly on Almada region.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: query,
+      config: {
+        systemInstruction: GEO_PROMPT,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            features: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  display_name: { type: Type.STRING },
+                  lat: { type: Type.NUMBER },
+                  lon: { type: Type.NUMBER }
+                },
+                required: ["display_name", "lat", "lon"]
+              }
+            }
+          },
+          required: ["features"]
+        }
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("AI returned empty response");
+    return JSON.parse(text) as GeocodeResponse;
+  } catch (error) {
+    console.error("AI Geocoding Error:", error);
+    return { features: [] };
   }
 }
