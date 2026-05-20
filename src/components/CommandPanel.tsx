@@ -1,9 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
-import { Mic, MicOff, Search, Terminal, AlertCircle, Loader2, GripVertical } from 'lucide-react';
+import { useState, useRef } from 'react';
+import { Search, Terminal, AlertCircle, Loader2, GripVertical } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { XMLParser } from 'fast-xml-parser';
-import { translateToSQL } from '../services/aiService';
-import { supabase } from '../lib/supabase';
+import { geocodeAddress } from '../services/aiService';
 import {
   DndContext, 
   closestCenter,
@@ -36,6 +34,8 @@ interface CommandPanelProps {
   availableLayers: Layer[];
   importedLayerIds: string[];
   visibleLayerIds: string[];
+  aiExplanation: string | null;
+  onResetFilters: () => void;
   onToggleImport: (id: string) => void;
   onToggleVisibility: (id: string) => void;
   onAddExternalLayer: (layer: any) => void;
@@ -92,34 +92,32 @@ function SortableLayerItem({
 }
 
 export default function CommandPanel({ 
-  onResultsUpdate, 
   resultsCount, 
   availableLayers,
   importedLayerIds,
   visibleLayerIds,
+  aiExplanation,
+  onResetFilters,
   onToggleImport,
   onToggleVisibility,
   onAddExternalLayer,
   onReorderLayers
 }: CommandPanelProps) {
-  const [query, setQuery] = useState('');
-  const [isListening, setIsListening] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [wmsUrl, setWmsUrl] = useState('');
-  const [wfsUrl, setWfsUrl] = useState('');
-  const [wmsLayers, setWmsLayers] = useState('');
-  const [wfsLayers, setWfsLayers] = useState('');
+  const [ogcUrl, setOgcUrl] = useState('');
+  const [ogcType, setOgcType] = useState<'WMS' | 'WFS'>('WMS');
+  const [discoveredLayers, setDiscoveredLayers] = useState<{name: string, title: string}[]>([]);
+  const [selectedLayer, setSelectedLayer] = useState('');
+  const [isDiscovering, setIsDiscovering] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSearchingAddress, setIsSearchingAddress] = useState(false);
   const [addressValue, setAddressValue] = useState('');
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
-  const [modalitySuggestions, setModalitySuggestions] = useState<string[]>([]);
-  const [showModalityPopup, setShowModalityPopup] = useState(false);
   const [showAddressPopup, setShowAddressPopup] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [aiExplanation, setAiExplanation] = useState<string | null>(null);
+  
+  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [activeTab, setActiveTab] = useState<'base' | 'data'>('base');
   
-  // DnD Sensors
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
@@ -127,550 +125,170 @@ export default function CommandPanel({
     })
   );
 
+  const handleDiscoverLayers = async () => {
+    if (!ogcUrl) {
+      setError("Por favor, insira um URL Base.");
+      return;
+    }
+    setIsDiscovering(true);
+    setError(null);
+    setDiscoveredLayers([]);
+    setSelectedLayer('');
+
+    try {
+      if (ogcType === 'WFS') {
+        if (typeof (window as any).obterCamadasWFS === 'function') {
+          const layers = await (window as any).obterCamadasWFS(ogcUrl);
+          setDiscoveredLayers(layers);
+        } else {
+          throw new Error("Script obterCamadasWFS não encontrado.");
+        }
+      } else {
+        if (typeof (window as any).obterCamadasWMS === 'function') {
+          const layers = await (window as any).obterCamadasWMS(ogcUrl);
+          setDiscoveredLayers(layers);
+        } else {
+          throw new Error("Script obterCamadasWMS não encontrado.");
+        }
+      }
+    } catch (err: any) {
+      setError(`Falha ao descobrir camadas: ${err.message}`);
+    } finally {
+      setIsDiscovering(false);
+    }
+  };
+
   const handleDragEnd = (event: any) => {
     const { active, over } = event;
 
-    if (active.id !== over.id) {
+    if (active && over && active.id !== over.id) {
       const oldIndex = importedLayerIds.indexOf(active.id);
       const newIndex = importedLayerIds.indexOf(over.id);
       onReorderLayers(arrayMove(importedLayerIds, oldIndex, newIndex));
-    }
-  };
-  
-  // Web Speech API
-  const recognitionRef = useRef<any>(null);
-
-  useEffect(() => {
-    if ('webkitSpeechRecognition' in window) {
-      const SpeechRecognition = (window as any).webkitSpeechRecognition;
-      recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = false;
-      recognitionRef.current.lang = 'pt-PT';
-
-      recognitionRef.current.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        setQuery(transcript);
-        setIsListening(false);
-      };
-
-      recognitionRef.current.onerror = () => {
-        setIsListening(false);
-      };
-    }
-  }, []);
-
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
-    } else {
-      setIsListening(true);
-      recognitionRef.current?.start();
-    }
-  };
-
-  const handleAddWFS = async () => {
-    if (!wfsUrl) return;
-    setIsImporting(true);
-    setError(null);
-    try {
-      const urlObj = new URL(wfsUrl);
-      
-      // Update typeNames from the wfsLayers field if present
-      if (wfsLayers) {
-        urlObj.searchParams.set('typeName', wfsLayers);
-        urlObj.searchParams.set('typeNames', wfsLayers);
-      }
-
-      // 1. Tentar obter os dados como estão ou forçar GetFeature se faltar o pedido
-      if (!urlObj.searchParams.has('request')) {
-        urlObj.searchParams.set('request', 'GetFeature');
-        urlObj.searchParams.set('service', 'WFS');
-        urlObj.searchParams.set('version', '1.1.0');
-      }
-
-      let response = await fetch(urlObj.toString());
-      if (!response.ok) {
-        // Se falhou, talvez seja porque forçamos GetFeature num URL que era só a base
-        urlObj.searchParams.set('request', 'GetCapabilities');
-        response = await fetch(urlObj.toString());
-      }
-
-      if (!response.ok) throw new Error('Falha na ligação ao servidor WFS (Erro HTTP ' + response.status + '). Verifique o CORS.');
-
-      const text = await response.text();
-      const parser = new XMLParser({ 
-        ignoreAttributes: false,
-        attributeNamePrefix: "@_"
-      });
-      const jsonObj = parser.parse(text);
-
-      // 2. Se for um GetCapabilities, tentar ler a primeira layer e fazer GetFeature
-      if (text.includes('WFS_Capabilities') || (jsonObj['wfs:WFS_Capabilities'] || jsonObj['WFS_Capabilities'])) {
-        const capabilities = jsonObj['wfs:WFS_Capabilities'] || jsonObj['WFS_Capabilities'];
-        const featureTypeList = capabilities.FeatureTypeList || capabilities['wfs:FeatureTypeList'];
-        const firstType = featureTypeList?.FeatureType || featureTypeList?.['wfs:FeatureType'];
-        const typeName = Array.isArray(firstType) ? firstType[0].Name || firstType[0]['wfs:Name'] : firstType?.Name || firstType?.['wfs:Name'] || firstType?.['@_name'];
-
-        if (!typeName) throw new Error('Serviço detetado mas não foram encontradas camadas (FeatureTypes) públicas.');
-
-        // Refazer o pedido para GetFeature da primeira layer
-        urlObj.searchParams.set('request', 'GetFeature');
-        urlObj.searchParams.set('typeName', typeName);
-        urlObj.searchParams.set('outputFormat', 'application/json'); // Tentar JSON primeiro
-        
-        let featRes = await fetch(urlObj.toString());
-        if (!featRes.ok || !featRes.headers.get('content-type')?.includes('json')) {
-          urlObj.searchParams.delete('outputFormat'); // Fallback para XML
-          featRes = await fetch(urlObj.toString());
-        }
-        
-        const featText = await featRes.text();
-        if (featRes.headers.get('content-type')?.includes('json')) {
-          const geojson = JSON.parse(featText);
-          onAddExternalLayer({
-            id: `wfs-${Date.now()}`,
-            name: typeName,
-            type: 'geojson',
-            data: geojson
-          });
-        } else {
-          // Processar GML do GetFeature
-          processGML(featText, typeName);
-        }
-        setWfsUrl('');
-        return;
-      }
-
-      // 3. Se já for um GetFeature (XML ou JSON)
-      if (text.trim().startsWith('{')) {
-        onAddExternalLayer({
-          id: `wfs-${Date.now()}`,
-          name: `WFS: ${urlObj.host}`,
-          type: 'geojson',
-          data: JSON.parse(text)
-        });
-      } else {
-        processGML(text, `WFS: ${urlObj.host}`);
-      }
-
-      setWfsUrl('');
-      setWfsLayers('');
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Erro ao importar WFS.');
-    } finally {
-      setIsImporting(false);
     }
   };
 
   const fetchAddressSuggestions = async (val: string) => {
     if (val.length < 3) {
       setAddressSuggestions([]);
+      setIsSearchingAddress(false);
       return;
     }
-    try {
-      // Usar a API do Nominatim (OpenStreetMap) filtrada por Almada
-      const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(val + ', Almada, Portugal')}&limit=5&addressdetails=1`);
-      const data = await resp.json();
-      setAddressSuggestions(data);
-    } catch (e) {
-      console.error('Nominatim error:', e);
-    }
-  };
-
-  const knownModalities = [
-    'Futebol', 'Vólei', 'Basquetebol', 'Andebol', 'Ténis', 'Padel', 'Natação', 'Hidroginástica',
-    'Karaté', 'Judo', 'Taekwondo', 'Yoga', 'Pilates', 'Zumba', 'Ginásio', 'Musculação', 'Fitness',
-    'Crossfit', 'Ciclismo', 'Atletismo', 'Surf', 'Bodyboard', 'Skate', 'Patinagem', 'Dança', 'Ballet'
-  ];
-
-  const handleAiInputChange = (val: string) => {
-    setQuery(val);
-    const lastWord = val.split(/[\s,]+/).pop() || '';
-    if (lastWord.length > 1) {
-      const matches = knownModalities.filter(m => 
-        m.toLowerCase().startsWith(lastWord.toLowerCase()) || 
-        (m.toLowerCase().includes(lastWord.toLowerCase()) && lastWord.length > 2)
-      );
-      setModalitySuggestions(matches);
-      setShowModalityPopup(matches.length > 0);
-    } else {
-      setShowModalityPopup(false);
-    }
-  };
-
-  const processGML = (xmlText: string, name: string) => {
-    const parser = new DOMParser();
-    const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-    const features: any[] = [];
     
-    // 1. Identify where features are located. 
-    // Usually inside <wfs:FeatureCollection> as children of <wfs:member> or <gml:featureMember>
-    let featureNodes = Array.from(xmlDoc.querySelectorAll('featureMember, member, [localName="featureMember"], [localName="member"]'));
-    
-    // If we didn't find members, the features might be literal children of the root collection
-    if (featureNodes.length === 0) {
-      const root = xmlDoc.documentElement;
-      if (root.localName.includes('FeatureCollection')) {
-        featureNodes = Array.from(root.children);
-      }
-    }
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
 
-    featureNodes.forEach((node) => {
-      // In a member node, the actual feature is the first child
-      const featureNode = node.localName === 'featureMember' || node.localName === 'member' ? node.firstElementChild : node;
-      if (!featureNode) return;
-
-      const props: any = {};
-      let geometry: any = null;
-
-      // Extract properties and geometry
-      const traverse = (el: Element) => {
-        if (el.children.length === 0) {
-          if (el.textContent?.trim()) {
-            props[el.localName] = el.textContent.trim();
-          }
-        } else {
-          // Look for GML geometry elements
-          const localName = el.localName.toLowerCase();
-          
-          // Check for Point
-          if (localName === 'point' || el.querySelector('Point, [localName="Point"]')) {
-            const pos = el.querySelector('pos, coordinates, [localName="pos"], [localName="coordinates"]');
-            if (pos) {
-              const coords = pos.textContent?.trim().split(/[\s,]+/).map(Number);
-              if (coords && coords.length >= 2) {
-                // Heuristic for coordinate order: WFS 1.1+ defaults to Lat,Lon for EPSG:4326
-                // Almada service is likely 1.1.0 or 2.0.0. 
-                // We'll flip if latitude looks like it's in the second position (between -90 and 90)
-                // or if it's explicitly PTTM06 which is X,Y
-                if (Math.abs(coords[0]) > 90 && Math.abs(coords[1]) <= 90) {
-                  geometry = { type: 'Point', coordinates: [coords[0], coords[1]] };
-                } else {
-                  geometry = { type: 'Point', coordinates: [coords[1], coords[0]] };
-                }
-              }
+    searchTimeoutRef.current = setTimeout(async () => {
+      setIsSearchingAddress(true);
+      try {
+        let results: any[] = [];
+        try {
+          const resp = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(val + ', Almada')}&limit=6&lang=pt`);
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data?.features?.length > 0) {
+              results = data.features.map((f: any) => ({
+                display_name: [f.properties.name, f.properties.street, f.properties.city].filter(Boolean).join(', '),
+                lat: f.geometry.coordinates[1],
+                lon: f.geometry.coordinates[0]
+              }));
             }
           }
-          
-          // Check for posList (Lines/Polygons)
-          const posList = el.querySelector('posList, coordinates, [localName="posList"], [localName="coordinates"]');
-          if (posList && !geometry) {
-            const raw = posList.textContent?.trim().split(/[\s,]+/).map(Number) || [];
-            if (raw.length >= 4) {
-              const shouldFlip = (Math.abs(raw[0]) <= 90 && Math.abs(raw[1]) > 90) || 
-                                 (Math.abs(raw[0]) <= 90 && Math.abs(raw[1]) <= 180); 
-              const coords: number[][] = [];
-              for (let j = 0; j < raw.length; j += 2) {
-                if (!isNaN(raw[j]) && !isNaN(raw[j + 1])) {
-                  coords.push(shouldFlip ? [raw[j + 1], raw[j]] : [raw[j], raw[j + 1]]);
-                }
-              }
-              
-              if (coords.length > 1) {
-                geometry = { type: 'LineString', coordinates: coords };
-              }
-            }
-          }
+        } catch (e) { console.warn('Photon fail', e); }
 
-          if (!geometry) {
-            Array.from(el.children).forEach(traverse);
+        if (results.length === 0) {
+          const aiGeocode = await geocodeAddress(val + ', Almada, Portugal');
+          if (aiGeocode.features?.length > 0) {
+            results = aiGeocode.features;
           }
         }
-      };
-
-      traverse(featureNode);
-
-      if (geometry) {
-        features.push({ type: 'Feature', geometry, properties: props });
+        setAddressSuggestions(results);
+      } catch (e) {
+        console.error('Final Search error:', e);
+        setAddressSuggestions([]);
+      } finally {
+        setIsSearchingAddress(false);
       }
-    });
-
-    if (features.length === 0) {
-      console.warn('GML Parsing failed for text:', xmlText.substring(0, 500));
-      throw new Error('Não foram encontrados dados geográficos compatíveis no XML. Verifique o Formato de Saída do serviço.');
-    }
-
-    onAddExternalLayer({
-      id: `wfs-xml-${Date.now()}`,
-      name: name,
-      type: 'geojson',
-      data: { type: 'FeatureCollection', features }
-    });
+    }, 400);
   };
 
-  const handleAddWMS = async () => {
-    if (!wmsUrl) return;
+  const handleImportLayer = async () => {
+    if (!selectedLayer) {
+      setError("Por favor, selecione uma camada.");
+      return;
+    }
     
     setIsImporting(true);
     setError(null);
 
     try {
-      const urlObj = new URL(wmsUrl);
-      onAddExternalLayer({
-        id: `wms-${Date.now()}`,
-        name: `WMS: ${urlObj.host}`,
-        type: 'wms',
-        url: wmsUrl,
-        layers: wmsLayers || '0'
-      });
-      
-      setWmsUrl('');
-      setWmsLayers('');
-    } catch (e: any) {
-      setError(e.message || 'Erro ao importar camada WMS.');
-    } finally {
-      setIsImporting(false);
-    }
-  };
-
-  const resetFilters = async () => {
-    setQuery('');
-    setAiExplanation(null);
-    setError(null);
-    setIsLoading(true);
-    try {
-      const { data, error } = await supabase.from('vw_entidades_completa').select('*');
-      if (!error && data) {
-        onResultsUpdate(data);
-      } else {
-        const { data: tableData } = await supabase.from('Entidades_Desportivas').select('*, geom');
-        if (tableData) onResultsUpdate(tableData);
-      }
-    } catch (err) {
-      console.error('Reset error:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleSearch = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!query.trim()) {
-      resetFilters();
-      return;
-    }
-
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      const aiResponse = await translateToSQL(query);
-      setAiExplanation(aiResponse.explanation);
-
-      // Helper to normalize strings for accent-insensitive comparison
-      const normalize = (str: string) => 
-        str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-
-      const normalizedQuery = normalize(query);
-      
-      // Detection for price filters (e.g. "até 15", "10€", "20 euros", "entre 10 e 15", "a 10€")
-      const priceNumbers = query.match(/\d+/g)?.map(Number) || [];
-      const isRangeIntent = normalizedQuery.includes('entre');
-      const isExactIntent = (normalizedQuery.includes(' a ') || normalizedQuery.includes(' exatamente ')) || 
-                            (!normalizedQuery.includes('ate') && !normalizedQuery.includes('menos') && !isRangeIntent && priceNumbers.length > 0);
-      
-      const targetPrice = priceNumbers.length > 0 ? (isRangeIntent ? null : priceNumbers[0]) : null;
-      const minPrice = isRangeIntent ? priceNumbers[0] : null;
-      const maxPrice = isRangeIntent ? priceNumbers[1] : null;
-
-      const isPriceIntent = normalizedQuery.includes('ate') || 
-                           normalizedQuery.includes('menos') || 
-                           normalizedQuery.includes('maximo') ||
-                           isRangeIntent ||
-                           isExactIntent ||
-                           query.includes('€') || 
-                           normalizedQuery.includes('euro');
-                            
-      const isPriceFilter = (priceNumbers.length > 0) && (isPriceIntent || (targetPrice !== null && targetPrice < 100));
-
-      // Extract meaningful keywords
-      const sanitizedQuery = normalizedQuery.replace(/[?.,!()[\]{}]/g, ' ').replace(/[€]/g, ' ');
-      const stopWords = [
-        'onde', 'posso', 'praticar', 'jogar', 'fazer', 'treinar', 'aula', 'aulas', 'querias', 'queria',
-        'ha', 'tem', 'existe', 'o', 'a', 'os', 'as', 'em', 'no', 'na', 'de', 'do', 'da', 
-        'com', 'alguem', 'encontrar', 'um', 'uma', 'ate', 'entre', 'euros', 'mensalidade', 'preco',
-        'quais', 'sao', 'os', 'melhores', 'proximo', 'perto', 'clube', 'clubes', 'ginasio', 'entidade',
-        'e', 'ou', 'para'
-      ];
-      const keywords = sanitizedQuery
-        .split(/\s+/)
-        .filter(w => {
-          const num = Number(w);
-          if (!isNaN(num) && priceNumbers.includes(num)) return false;
-          return w.length > 1 && !stopWords.includes(w);
-        });
-      
-      const searchTerms = keywords.length > 0 ? keywords : [];
-
-      const { data, error: dbError } = await supabase
-        .from('vw_entidades_completa')
-        .select('*');
-
-      if (dbError) throw dbError;
-      
-      const filtered = (data || []).filter(item => {
-        // 1. Price filtering check
-        if (isPriceFilter) {
-          // Check summary field
-          const itemPriceRaw = String(item.mensalidade || "").replace(/[^\d.]/g, '');
-          const summaryPrice = parseFloat(itemPriceRaw);
-          
-          const checkPrice = (p: number) => {
-            if (isRangeIntent && minPrice !== null && maxPrice !== null) {
-              return p >= minPrice && p <= maxPrice;
+      if (ogcType === 'WFS') {
+        if (typeof (window as any).importarDadosWFS === 'function') {
+          (window as any).importarDadosWFS(ogcUrl, selectedLayer, (err: any, geojson: any) => {
+            setIsImporting(false);
+            if (err) {
+              setError("Erro ao importar WFS: " + err.message);
+              return;
             }
-            if (isExactIntent && priceNumbers.length > 0) {
-              // Check if it matches any of the mentioned prices exactly
-              return priceNumbers.includes(p);
+            if (geojson) {
+              onAddExternalLayer({
+                id: `wfs-${Date.now()}`,
+                name: selectedLayer,
+                type: 'geojson',
+                data: geojson
+              });
+              setDiscoveredLayers([]);
+              setSelectedLayer('');
             }
-            return targetPrice !== null && p <= targetPrice;
-          };
-
-          // Also check the oferta array if present
-          let hasPriceMatch = !isNaN(summaryPrice) && checkPrice(summaryPrice);
-          
-          if (!hasPriceMatch && item.oferta) {
-            try {
-              const offers = typeof item.oferta === 'string' ? JSON.parse(item.oferta) : item.oferta;
-              if (Array.isArray(offers)) {
-                hasPriceMatch = offers.some(o => {
-                  const p = parseFloat(String(o.preco || "").replace(/[^\d.]/g, ''));
-                  return !isNaN(p) && checkPrice(p);
-                });
-              }
-            } catch (e) { /* ignore */ }
-          }
-
-          // Special case: if the club says "Gratuito" or price is 0
-          if (!hasPriceMatch) {
-            const m = String(item.mensalidade || "").toLowerCase();
-            if (m.includes('gratuito') || m.includes('isento') || m === '0') {
-              hasPriceMatch = true;
-            }
-          }
-
-          if (!hasPriceMatch) return false;
-          
-          // If query was JUST a price or price words, we pass this stage
-          if (searchTerms.length === 0) return true;
-        }
-
-        // 2. Keyword/Search Terms filtering check
-        if (searchTerms.length > 0) {
-          // Heuristic: identify if we have multiple potential activity terms
-          const activities = ['futebol', 'volei', 'tenis', 'basquetebol', 'natacao', 'karate', 'judo', 'zumba', 'ginasio', 'fitness', 'yoga', 'padel', 'atletismo'];
-          const activityTerms = searchTerms.filter(t => activities.some(a => a.includes(t) || t.includes(a)));
-          const otherTerms = searchTerms.filter(t => !activityTerms.includes(t));
-
-          // Other terms (like locations) MUST match (AND)
-          const otherPass = otherTerms.every(term => {
-            const t = term.trim();
-            if (!t) return true;
-            
-            const targetFields = [
-              { val: item.nome_clube, type: 'text' },
-              { val: item.morada, type: 'location' },
-              { val: item.nome_freguesia, type: 'freguesia' },
-              { val: item.nome_uniao_freguesia, type: 'freguesia' }
-            ];
-
-            return targetFields.some(field => field.val && normalize(field.val).includes(t));
           });
-
-          if (!otherPass) return false;
-
-          // Activity terms match (OR) if multiple are present
-          if (activityTerms.length > 0) {
-            return activityTerms.some(term => {
-              const t = term.trim();
-              if (!t) return false;
-              
-              const targetFields = [
-                { val: item.nome_clube, type: 'text' },
-                { val: item.modalidade, type: 'text' },
-                { val: item.categoria, type: 'text' }
-              ];
-
-              let hasInOferta = false;
-              if (item.oferta) {
-                try {
-                  const offers = typeof item.oferta === 'string' ? JSON.parse(item.oferta) : item.oferta;
-                  if (Array.isArray(offers)) {
-                    hasInOferta = offers.some(o => normalize(o.mod || "").includes(t));
-                  }
-                } catch (e) { /* ignore */ }
-              }
-
-              return targetFields.some(field => field.val && normalize(field.val).includes(t)) || hasInOferta;
-            });
-          }
-
-          return true;
         }
-
-        // Default: If it was a price filter without keywords and passed above, it included.
-        return true; 
-      });
-
-      // Prioritize activity matches (modalidade/categoria/oferta)
-      const activityMatches = filtered.filter(item => {
-        // Find which terms are actually about activity
-        return searchTerms.some(term => {
-          const t = term.trim();
-          if (!t) return false;
-          
-          let hasInOferta = false;
-          if (item.oferta) {
-            try {
-              const offers = typeof item.oferta === 'string' ? JSON.parse(item.oferta) : item.oferta;
-              if (Array.isArray(offers)) {
-                hasInOferta = offers.some(o => normalize(o.mod || "").includes(t));
-              }
-            } catch (e) { /* ignore */ }
-          }
-
-          return (item.modalidade && normalize(item.modalidade).includes(t)) || 
-                 (item.categoria && normalize(item.categoria).includes(t)) ||
-                 hasInOferta;
-        });
-      });
-
-      // If we are searching for an activity and found matches, ONLY show those.
-      // Otherwise fallback to broader matches.
-      const finalResults = (activityMatches.length > 0) ? activityMatches : filtered;
-      
-      if (finalResults.length === 0 && (searchTerms.length > 0 || isPriceFilter)) {
-        setError(`Não foram encontrados resultados para a sua pesquisa.`);
+      } else {
+        if (typeof (window as any).importarDadosWMS === 'function') {
+          const wmsLayerInstance = (window as any).importarDadosWMS(ogcUrl, selectedLayer);
+          onAddExternalLayer({
+            id: `wms-${Date.now()}`,
+            name: selectedLayer,
+            type: 'wms',
+            url: ogcUrl,
+            layers: selectedLayer,
+            wmsInstance: wmsLayerInstance
+          });
+          setDiscoveredLayers([]);
+          setSelectedLayer('');
+          setIsImporting(false);
+        } else if (typeof (window as any).configurarCamadaWMS === 'function') {
+          onAddExternalLayer({
+            id: `wms-${Date.now()}`,
+            name: selectedLayer,
+            type: 'wms',
+            url: ogcUrl,
+            layers: selectedLayer
+          });
+          setDiscoveredLayers([]);
+          setSelectedLayer('');
+          setIsImporting(false);
+        }
       }
-      
-      onResultsUpdate(finalResults);
-
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Erro ao processar consulta.');
-    } finally {
-      setIsLoading(false);
+      setError(`Erro ao importar: ${err.message}`);
+      setIsImporting(false);
     }
   };
 
   return (
     <div className="flex flex-col h-full gap-4 overflow-hidden px-1">
-      {/* Results HUD - Smaller */}
       <div className="px-3 py-1.5 bg-dark-ink text-pearl text-[9px] font-bold flex justify-between items-center shadow-bold border-2 border-dark-ink shrink-0">
         <div className="flex items-center gap-2">
           <span className="opacity-60 uppercase tracking-widest leading-none">Resultados</span>
           <span className="text-tech-green text-xs font-black">{resultsCount}</span>
         </div>
         <button 
-          onClick={resetFilters}
+          onClick={onResetFilters}
           className="text-tech-green hover:text-white transition-colors uppercase tracking-widest text-[8px] bg-white/10 px-2 py-0.5 rounded-sm"
         >
           Limpar Filtros
         </button>
       </div>
 
-      {/* Address Search Bar */}
       <section className="bg-white border-2 border-dark-ink p-4 shadow-bold rounded-sm shrink-0">
         <label className="label-micro block mb-2 leading-none">Localização / Morada</label>
         <div className="relative group">
@@ -680,52 +298,78 @@ export default function CommandPanel({
             placeholder="Pesquisar morada em Almada..."
             className="w-full bg-pearl border border-gray-200 py-2 pl-3 pr-10 text-[11px] focus:outline-none focus:ring-1 focus:ring-dark-ink transition-all font-medium"
             onChange={(e) => {
-              setAddressValue(e.target.value);
-              fetchAddressSuggestions(e.target.value);
+              const val = e.target.value;
+              setAddressValue(val);
+              fetchAddressSuggestions(val);
               setShowAddressPopup(true);
             }}
-            onBlur={() => setTimeout(() => setShowAddressPopup(false), 200)}
+            onFocus={() => {
+              if (addressValue.length >= 3) setShowAddressPopup(true);
+            }}
+            onBlur={() => setTimeout(() => setShowAddressPopup(false), 250)}
             onKeyDown={async (e) => {
               if (e.key === 'Enter') {
                 const val = (e.target as HTMLInputElement).value;
                 if (!val) return;
+                setIsSearchingAddress(true);
                 try {
-                  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(val + ', Almada, Portugal')}&countrycodes=pt`);
-                  const data = await res.json();
-                  if (data && data.length > 0) {
-                    const { lat, lon } = data[0];
-                    window.dispatchEvent(new CustomEvent('map-fly-to', { detail: { lat: parseFloat(lat), lon: parseFloat(lon) } }));
+                  let lat, lon;
+                  const pResp = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(val + ', Almada')}&limit=1&lang=pt`);
+                  if (pResp.ok) {
+                    const pData = await pResp.json();
+                    if (pData?.features?.length > 0) {
+                      [lon, lat] = pData.features[0].geometry.coordinates;
+                    }
+                  }
+                  if (lat && lon) {
+                    window.dispatchEvent(new CustomEvent('map-fly-to', { detail: { lat, lon } }));
+                  } else {
+                    setError('Não foi possível localizar este endereço.');
                   }
                 } catch (err) {
                   console.error('Geocoding error:', err);
+                } finally {
+                  setIsSearchingAddress(false);
+                  setShowAddressPopup(false);
                 }
               }
             }}
           />
           <Search size={14} className="absolute right-3 top-2.5 text-gray-400 group-focus-within:text-dark-ink" />
 
-          {/* Address Suggestion Popup */}
           <AnimatePresence>
-            {showAddressPopup && addressSuggestions.length > 0 && (
+            {showAddressPopup && (addressSuggestions.length > 0 || isSearchingAddress) && (
               <motion.div 
                 initial={{ opacity: 0, y: -5 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -5 }}
-                className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-dark-ink/10 shadow-xl rounded-sm overflow-hidden max-h-[160px] overflow-y-auto"
+                className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border-2 border-dark-ink shadow-bold rounded-sm overflow-hidden max-h-[220px] overflow-y-auto"
               >
+                {isSearchingAddress && addressSuggestions.length === 0 && (
+                  <div className="p-3 text-[10px] text-gray-500 flex items-center gap-2 italic">
+                    <Loader2 size={12} className="animate-spin text-tech-green" />
+                    Procurando...
+                  </div>
+                )}
+                
                 {addressSuggestions.map((addr, idx) => (
                   <button
                     key={idx}
                     type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       setAddressValue(addr.display_name);
                       window.dispatchEvent(new CustomEvent('map-fly-to', { detail: { lat: parseFloat(addr.lat), lon: parseFloat(addr.lon) } }));
                       setShowAddressPopup(false);
                     }}
-                    className="w-full text-left px-2 py-2 text-[9px] hover:bg-tech-green/5 border-b border-gray-50 last:border-0 leading-tight"
+                    className="w-full text-left px-3 py-2 text-[9px] hover:bg-tech-green/10 border-b border-gray-100 last:border-0 leading-tight group transition-colors"
                   >
-                    <div className="font-semibold text-dark-ink truncate">{addr.display_name.split(',')[0]}</div>
-                    <div className="text-gray-400 truncate opacity-70">{addr.display_name.split(',').slice(1).join(',')}</div>
+                    <div className="font-bold text-dark-ink group-hover:text-tech-green truncate">
+                      {addr.display_name.split(',')[0]}
+                    </div>
+                    <div className="text-gray-400 truncate opacity-80 text-[8px]">
+                      {addr.display_name.split(',').slice(1).join(',').trim()}
+                    </div>
                   </button>
                 ))}
               </motion.div>
@@ -734,89 +378,14 @@ export default function CommandPanel({
         </div>
       </section>
 
-      {/* Search Section */}
-      <section className="bg-white border-2 border-dark-ink p-4 shadow-bold rounded-sm shrink-0 flex flex-col">
-        <div className="flex justify-between items-center mb-2">
-          <label className="label-micro !mb-0 leading-none">Pergunte à IA</label>
-          {query && (
-            <button 
-              onClick={resetFilters}
-              className="text-[9px] font-bold text-gray-400 hover:text-dark-ink uppercase tracking-tighter"
-            >
-              Limpar
-            </button>
-          )}
-        </div>
-        <form onSubmit={handleSearch} className="relative">
-          <div className="relative group">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => handleAiInputChange(e.target.value)}
-              onBlur={() => setTimeout(() => setShowModalityPopup(false), 200)}
-              placeholder="Onde praticar zumba..."
-              className="w-full bg-pearl border-b-2 border-dark-ink/10 py-2 text-[13px] font-medium focus:outline-none focus:border-tech-green transition-all placeholder:text-gray-300 pr-16"
-            />
-
-            {/* Modality Suggestion Popup */}
-            <AnimatePresence>
-              {showModalityPopup && modalitySuggestions.length > 0 && (
-                <motion.div 
-                  initial={{ opacity: 0, y: -5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-dark-ink/10 shadow-xl rounded-sm overflow-hidden"
-                >
-                  {modalitySuggestions.map((m, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => {
-                        const words = query.split(/[\s,]+/);
-                        words.pop();
-                        setQuery([...words, m].join(' ') + ' ');
-                        setShowModalityPopup(false);
-                      }}
-                      className="w-full text-left px-3 py-2 text-[10px] hover:bg-tech-green/10 flex items-center justify-between border-b border-gray-50 last:border-0"
-                    >
-                      <span className="font-medium text-dark-ink">{m}</span>
-                      <span className="text-[8px] text-gray-400 uppercase tracking-tighter">Modalidade</span>
-                    </button>
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <div className="absolute right-0 top-0 flex items-center h-full gap-1">
-              <button
-                type="button"
-                onClick={toggleListening}
-                className={`p-1.5 rounded transition-colors ${isListening ? 'bg-red-500 text-white' : 'text-gray-400 hover:text-dark-ink'}`}
-              >
-                {isListening ? <MicOff size={14} /> : <Mic size={14} />}
-              </button>
-              <button
-                type="submit"
-                disabled={isLoading}
-                className="text-dark-ink p-1.5 hover:text-tech-green disabled:opacity-30 transition-colors"
-              >
-                {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-              </button>
-            </div>
-          </div>
-        </form>
-      </section>
-
-      {/* Content Panel */}
       <section className="bg-white border-2 border-dark-ink rounded-sm flex-1 flex flex-col min-h-0 overflow-hidden relative">
         <div className="bg-pearl border-b border-dark-ink/10 px-4 py-2 flex justify-between items-center shrink-0">
           <label className="label-micro !mb-0 font-black flex gap-1 items-baseline">
-            CONTEÚDO <span className="text-[7px] text-dark-ink/40 font-bold lowercase italic">(ativar layer em catálogo de dados)</span>
+            CONTEÚDO <span className="text-[7px] text-dark-ink/40 font-bold lowercase italic">(escolher dados no catálogo)</span>
           </label>
         </div>
 
-        {/* AI Insight Bar - Pinned inside the content area for stability */}
-        {aiExplanation && !isLoading && (
+        {aiExplanation && (
           <div className="bg-tech-green/10 border-b border-tech-green/20 px-4 py-2 shrink-0">
             <p className="text-[10px] leading-tight italic text-dark-ink/80 flex gap-2">
               <Terminal size={10} className="shrink-0 mt-0.5" />
@@ -825,8 +394,6 @@ export default function CommandPanel({
           </div>
         )}
 
-        
-        {/* Tabs */}
         <div className="flex border-b border-dark-ink/10 sticky top-0 bg-white z-10 font-mono text-[9px] font-bold uppercase tracking-widest">
           <button 
             onClick={() => setActiveTab('base')}
@@ -895,64 +462,72 @@ export default function CommandPanel({
                 exit={{ opacity: 0, x: -10 }}
                 className="space-y-4"
               >
-                {/* External Import Section */}
                 <div className="bg-pearl/50 border border-dark-ink/5 p-3 rounded-sm space-y-4">
-                  <p className="text-[10px] font-bold text-dark-ink uppercase tracking-widest border-b border-dark-ink/5 pb-1">Importar OGC</p>
+                  <div className="flex justify-between items-center border-b border-dark-ink/5 pb-1">
+                    <p className="text-[10px] font-bold text-dark-ink uppercase tracking-widest">Importar OGC</p>
+                    <div className="flex bg-white border border-dark-ink/10 rounded-sm overflow-hidden">
+                      <button 
+                        onClick={() => { setOgcType('WMS'); setDiscoveredLayers([]); }}
+                        className={`px-2 py-0.5 text-[8px] font-bold ${ogcType === 'WMS' ? 'bg-dark-ink text-pearl' : 'text-gray-400'}`}
+                      >
+                        WMS
+                      </button>
+                      <button 
+                        onClick={() => { setOgcType('WFS'); setDiscoveredLayers([]); }}
+                        className={`px-2 py-0.5 text-[8px] font-bold ${ogcType === 'WFS' ? 'bg-dark-ink text-pearl' : 'text-gray-400'}`}
+                      >
+                        WFS
+                      </button>
+                    </div>
+                  </div>
                   
-                  {/* WMS Section */}
                   <div className="space-y-2">
-                    <label className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Serviço WMS</label>
-                    <div className="flex gap-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">URL do Serviço</label>
+                      <span className="text-[7px] text-gray-300 font-mono italic">standard: {ogcType}</span>
+                    </div>
+                    <div className="flex gap-1">
                       <input 
                         type="text" 
-                        placeholder="URL do WMS..."
-                        value={wmsUrl}
-                        onChange={(e) => setWmsUrl(e.target.value)}
+                        placeholder="Ex: http://geoserver.com/wms"
+                        value={ogcUrl}
+                        onChange={(e) => setOgcUrl(e.target.value)}
                         className="flex-1 bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
                       />
                       <button 
-                        onClick={() => handleAddWMS()}
-                        disabled={isImporting}
-                        className="bg-dark-ink text-pearl text-[9px] font-bold px-3 py-1.5 uppercase hover:bg-tech-green hover:text-dark-ink transition-all disabled:opacity-50"
+                        onClick={handleDiscoverLayers}
+                        disabled={isDiscovering}
+                        className="bg-dark-ink text-pearl text-[9px] font-black px-3 py-1.5 uppercase hover:bg-tech-green hover:text-dark-ink transition-all disabled:opacity-50"
                       >
-                        Add
+                        {isDiscovering ? '...' : 'Procurar'}
                       </button>
                     </div>
-                    <input 
-                      type="text" 
-                      placeholder="Camadas WMS (ex: 0,1,2)..."
-                      value={wmsLayers}
-                      onChange={(e) => setWmsLayers(e.target.value)}
-                      className="w-full bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
-                    />
                   </div>
 
-                  {/* WFS Section */}
                   <div className="space-y-2">
-                    <label className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Serviço WFS</label>
-                    <div className="flex gap-2">
-                      <input 
-                        type="text" 
-                        placeholder="URL do WFS..."
-                        value={wfsUrl}
-                        onChange={(e) => setWfsUrl(e.target.value)}
-                        className="flex-1 bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
-                      />
-                      <button 
-                        onClick={() => handleAddWFS()}
-                        disabled={isImporting}
-                        className="bg-dark-ink text-pearl text-[9px] font-bold px-3 py-1.5 uppercase hover:bg-tech-green hover:text-dark-ink transition-all disabled:opacity-50"
+                    <div className="flex justify-between items-center">
+                      <label className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Camada Disponível</label>
+                    </div>
+                    <div className="flex gap-1">
+                      <select 
+                        value={selectedLayer}
+                        onChange={(e) => setSelectedLayer(e.target.value)}
+                        className={`flex-1 bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all appearance-none ${discoveredLayers.length === 0 ? 'opacity-50 cursor-not-allowed italic text-gray-400' : ''}`}
+                        disabled={discoveredLayers.length === 0 || isDiscovering}
                       >
-                        Add
+                        <option value="">{discoveredLayers.length > 0 ? "Escolha uma camada..." : "Aguardando procura..."}</option>
+                        {discoveredLayers.map((l, i) => (
+                          <option key={i} value={l.name}>{l.title || l.name}</option>
+                        ))}
+                      </select>
+                      <button 
+                        onClick={handleImportLayer}
+                        disabled={isImporting || !selectedLayer}
+                        className="bg-tech-green text-dark-ink text-[9px] font-black px-3 py-1.5 uppercase hover:bg-dark-ink hover:text-pearl transition-all disabled:opacity-50"
+                      >
+                        {isImporting ? '...' : 'Importar'}
                       </button>
                     </div>
-                    <input 
-                      type="text" 
-                      placeholder="Tipo de Objeto WFS (typeNames)..."
-                      value={wfsLayers}
-                      onChange={(e) => setWfsLayers(e.target.value)}
-                      className="w-full bg-white border border-dark-ink/10 px-2 py-1.5 text-[10px] focus:outline-none focus:border-tech-green transition-all"
-                    />
                   </div>
                   
                   {error && (
@@ -964,7 +539,7 @@ export default function CommandPanel({
 
                 <div className="space-y-4">
                   <div className="pt-2">
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 px-1">Conjuntos Disponíveis</p>
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 px-1">Conjuntos Locais</p>
                     <div className="flex flex-col gap-1">
                       {availableLayers.map(layer => (
                         <div key={layer.id} className="flex items-center justify-between p-2 hover:bg-pearl rounded transition-colors group">
