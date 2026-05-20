@@ -41,25 +41,11 @@ export function AttributeTable({ data, isOpen, onClose }: AttributeTableProps) {
 
   const exportToCSV = () => {
     if (data.length === 0) return;
-    // Export base on current columns
-    const headers = currentAllowedKeys.map(k => getHeaderLabel(k)).join(',');
-    const rows = data.map(row => 
-      currentAllowedKeys.map(key => {
-        const val = row[key];
-        return typeof val === 'string' ? `"${val.replace(/"/g, '""')}"` : val;
-      }).join(',')
-    ).join('\n');
-    
-    const csvContent = "data:text/csv;charset=utf-8," + headers + "\n" + rows;
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "atributos.csv");
-    
-    if (typeof document !== 'undefined' && document.body) {
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+    // CHAMADA AO SCRIPT VANILLA JS (PROGWEB_JS_Tools.js)
+    if (typeof (window as any).exportarParaCSV === 'function') {
+      (window as any).exportarParaCSV(data, 'exportacao_move_te.csv');
+    } else {
+      console.error("Script de exportação não carregado.");
     }
   };
 
